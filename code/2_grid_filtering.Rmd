@@ -1,0 +1,199 @@
+---
+title: "ARTS Planet Basemap Grids to Download"
+author: "Heidi Rodenhizer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Load Packages
+
+```{r}
+library(sf)
+library(viridis)
+library(tidyverse)
+theme_set(theme_bw())
+```
+
+# Load Data
+
+```{r}
+arts = st_read('../ARTS/ARTS_main_dataset/v.2.1.0/ARTS_main_dataset_v.2.1.0.geojson')
+planet_grids = st_read('./data/circumpolar_global_basemap_grids.geojson')
+```
+
+# Intersection
+
+```{r}
+planet_grids_filter = planet_grids %>%
+  st_transform(st_crs(arts)) %>%
+  filter(
+    map_lgl(
+      st_intersects(., arts, sparse = TRUE),
+      ~ length(.x) > 0
+    )
+  )
+
+basemap_years = seq(2016, 2023)
+
+arts_grids = planet_grids_filter |>
+  st_transform(st_crs(arts)) |>
+  st_join(
+    arts,
+    left = FALSE # for inner join
+    ) |>
+  select(BaseMapDate, id:percent_covered) |>
+  separate_wider_delim(
+    BaseMapDate, 
+    ',',
+    names = c('start_year', 'end_year'),
+    cols_remove = FALSE
+    ) |>
+  mutate(
+    across(
+      start_year:end_year,
+      ~ .x |>
+        ymd() |>
+        year()
+      ),
+    # having NA in start_year doesn't work with line 4 of target_year = case_when(...), so swith to 0
+    start_year = case_when(is.na(start_year) ~ 0,
+                           TRUE ~ start_year)
+  ) |>
+  rowwise() |>
+  mutate(
+    target_year = case_when(
+      end_year < min(basemap_years) ~ as.character(min(basemap_years)),
+      start_year == 0 ~ as.character(end_year),
+      start_year == end_year ~ as.character(end_year),
+      TRUE ~ str_flatten(
+        seq(start_year, end_year)[
+          which(seq(start_year, end_year) %in% basemap_years)
+        ],
+        collapse = ','
+      )
+    ),
+    .after = 'end_year'
+  ) |>
+  ungroup() |>
+  separate_wider_delim(
+    target_year, 
+    ',', 
+    names = paste('target_year', seq(1, length(basemap_years)), sep = '_'),
+    too_few = 'align_start'
+    ) |>
+  pivot_longer(
+    starts_with('target'), 
+    names_to = 'replicate', 
+    values_to = 'target_year'
+    ) |>
+  mutate(target_year = as.numeric(target_year),
+         discrepancy = case_when(
+           is.na(start_year) & target_year <= end_year ~ 0,
+           is.na(start_year) & target_year > end_year ~ target_year - end_year,
+           start_year <= target_year & target_year <= end_year ~ 0,
+           start_year > target_year ~ target_year - start_year,
+           target_year > end_year ~ target_year - end_year
+         )) |>
+  filter(!is.na(target_year)) |>
+  st_as_sf()
+
+arts_grids_filter = arts_grids |>
+  slice(1, .by = c('id', 'target_year')) |>
+  select(target_year, id, link, replicate) |>
+  arrange(id, target_year)
+
+print(
+  paste(
+    'Storage Space for Planet Basemap Grids in Closest Year to Each RTS:', 
+    round(
+      nrow(arts_grids_filter)*30/1000/1000, 
+      2
+      ),
+    '(TB)'
+    )
+  )
+
+# if we got all years for each grid?
+grid_ids = arts_grids_filter |>
+  pull(id) |>
+  unique()
+
+print(
+  paste(
+    'Storage Space for Planet Basemap Grids in All Available Years:', 
+    round(
+      nrow(expand_grid(id = grid_ids, year = basemap_years))*30/1000/1000, 
+      2
+      ),
+    '(TB)'
+    )
+  )
+```
+
+```{r}
+grid_counts_by_id = arts_grids_filter |>
+  st_drop_geometry() |>
+  count(id)
+
+print(
+  paste(
+    'Number of unique grid locations:', 
+    as.character(nrow(grid_counts_by_id))
+  )
+)
+
+print(
+  paste(
+    'Number of grids with multiple years', 
+    nrow(grid_counts_by_id |> filter(n > 1))
+  )
+)
+
+ggplot(grid_counts_by_id, aes(x = n)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(name = 'Number of Years per Basemap Grid') +
+  scale_y_continuous(expand = expand_scale(mult = c(0, 0.05)))
+
+ggplot(arts_grids, 
+       aes(x = discrepancy,
+           color = discrepancy > 0,
+           fill = discrepancy > 0),
+       linewidth = 0.1) +
+  geom_histogram(binwidth = 1) +
+  scale_color_manual(name = 'Gap Between\nImagery Sources', 
+                     values = c('black', 'red')) +
+  scale_fill_manual(name = 'Gap Between\nImagery Sources', 
+                    values = c('black', 'red')) +
+  scale_x_continuous(name = 'Planet Basemap Target Year - Delineation Basemap End Year') +
+  scale_y_continuous(name = 'Count',
+                     expand = expand_scale(mult = c(0, 0.05)))
+
+arts_grids |>
+  count(discrepancy)
+```
+
+# Map of Output
+
+```{r}
+ggplot() +
+  geom_sf(
+    data = arts, 
+    color = 'black', 
+    fill = 'black',
+    size = 0.1,
+    linewidth = 0.1
+    ) +
+  geom_sf(
+    data = arts_grids_filter, 
+    aes(color = factor(target_year)), 
+    fill = 'transparent',
+    ) +
+  scale_color_viridis(discrete = TRUE)
+```
+
+# Save Output
+
+```{r}
+st_write(arts_grids_filter, './data/planet_grids_for_arts_closest_year.geojson')
+```
+
