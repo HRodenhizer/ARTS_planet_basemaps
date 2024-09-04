@@ -33,15 +33,23 @@ planet_grids_filter = planet_grids %>%
     )
   )
 
-basemap_years = seq(2016, 2023)
-
 arts_grids = planet_grids_filter |>
+  mutate(planet_basemap_year = as.numeric(str_extract(name, '\\d{4}'))) |>
   st_transform(st_crs(arts)) |>
   st_join(
     arts,
     left = FALSE # for inner join
     ) |>
-  select(BaseMapDate, id:percent_covered) |>
+  mutate(replicate = row_number(),
+         .by = c(CentroidLat, CentroidLon)) |>
+  select(
+    planet_basemap_year, 
+    BaseMapDate, 
+    CentroidLat, 
+    CentroidLon, 
+    id:percent_covered, 
+    replicate
+    ) |>
   separate_wider_delim(
     BaseMapDate, 
     ',',
@@ -59,48 +67,49 @@ arts_grids = planet_grids_filter |>
     start_year = case_when(is.na(start_year) ~ 0,
                            TRUE ~ start_year)
   ) |>
+  filter(
+    # if the earliest planet basemap is after the last date of the delineation imagery, keep the earliest basemap year
+    (planet_basemap_year > end_year & planet_basemap_year == min(planet_basemap_year)) |
+     # if the planet basemap falls between (or is equal to) the start and end years of the delineation imagery, keep the row
+     (start_year != 0 & planet_basemap_year >= start_year & planet_basemap_year <= end_year) |
+     # if the start year of the delineation imagery is unknown, keep the earliest basemap year
+      (start_year == 0 & planet_basemap_year == min(planet_basemap_year)),
+    .by = c(CentroidLat, CentroidLon)
+  ) |>
   rowwise() |>
   mutate(
-    target_year = case_when(
-      end_year < min(basemap_years) ~ as.character(min(basemap_years)),
-      start_year == 0 ~ as.character(end_year),
-      start_year == end_year ~ as.character(end_year),
-      TRUE ~ str_flatten(
-        seq(start_year, end_year)[
-          which(seq(start_year, end_year) %in% basemap_years)
-        ],
-        collapse = ','
-      )
+    min_discrepancy = case_when(
+      start_year == 0 & planet_basemap_year <= end_year ~ 0,
+      start_year == 0 & planet_basemap_year > end_year ~ planet_basemap_year - end_year,
+      start_year <= planet_basemap_year & planet_basemap_year <= end_year ~ 0,
+      planet_basemap_year > end_year ~ planet_basemap_year - end_year,
+      start_year > planet_basemap_year ~ planet_basemap_year - start_year,
     ),
-    .after = 'end_year'
+    max_discrepancy = case_when(
+     start_year == 0 ~ NA_real_,
+      TRUE ~ c(
+        planet_basemap_year - start_year, 
+        planet_basemap_year - end_year
+      )[which(
+        c(
+          abs(planet_basemap_year - start_year), 
+          abs(planet_basemap_year - end_year)
+        ) == max(
+          c(
+            abs(planet_basemap_year - start_year), 
+            abs(planet_basemap_year - end_year)
+          )
+        )
+      )][1]
+    )
   ) |>
   ungroup() |>
-  separate_wider_delim(
-    target_year, 
-    ',', 
-    names = paste('target_year', seq(1, length(basemap_years)), sep = '_'),
-    too_few = 'align_start'
-    ) |>
-  pivot_longer(
-    starts_with('target'), 
-    names_to = 'replicate', 
-    values_to = 'target_year'
-    ) |>
-  mutate(target_year = as.numeric(target_year),
-         discrepancy = case_when(
-           is.na(start_year) & target_year <= end_year ~ 0,
-           is.na(start_year) & target_year > end_year ~ target_year - end_year,
-           start_year <= target_year & target_year <= end_year ~ 0,
-           start_year > target_year ~ target_year - start_year,
-           target_year > end_year ~ target_year - end_year
-         )) |>
-  filter(!is.na(target_year)) |>
   st_as_sf()
 
 arts_grids_filter = arts_grids |>
-  slice(1, .by = c('id', 'target_year')) |>
-  select(target_year, id, link, replicate) |>
-  arrange(id, target_year)
+  slice(1, .by = c('id', 'planet_basemap_year')) |>
+  select(planet_basemap_year, id, link, replicate) |>
+  arrange(id, planet_basemap_year)
 
 print(
   paste(
@@ -155,21 +164,38 @@ ggplot(grid_counts_by_id, aes(x = n)) +
   scale_y_continuous(expand = expand_scale(mult = c(0, 0.05)))
 
 ggplot(arts_grids, 
-       aes(x = discrepancy,
-           color = discrepancy > 0,
-           fill = discrepancy > 0),
+       aes(x = min_discrepancy,
+           color = min_discrepancy > 0,
+           fill = min_discrepancy > 0),
        linewidth = 0.1) +
   geom_histogram(binwidth = 1) +
-  scale_color_manual(name = 'Gap Between\nImagery Sources', 
+  scale_color_manual(name = 'Planet Basemap\nNewer than\nDelineation Imagery', 
                      values = c('black', 'red')) +
-  scale_fill_manual(name = 'Gap Between\nImagery Sources', 
+  scale_fill_manual(name = 'Planet Basemap\nNewer than\nDelineation Imagery', 
                     values = c('black', 'red')) +
-  scale_x_continuous(name = 'Planet Basemap Target Year - Delineation Basemap End Year') +
+  scale_x_continuous(name = 'Minimum Discrepancy') +
   scale_y_continuous(name = 'Count',
                      expand = expand_scale(mult = c(0, 0.05)))
 
 arts_grids |>
-  count(discrepancy)
+  count(min_discrepancy)
+
+ggplot(arts_grids, 
+       aes(x = max_discrepancy,
+           color = max_discrepancy > 0,
+           fill = max_discrepancy > 0),
+       linewidth = 0.1) +
+  geom_histogram(binwidth = 1) +
+  scale_color_manual(name = 'Planet Basemap\nNewer than\nDelineation Imagery', 
+                     values = c('black', 'red')) +
+  scale_fill_manual(name = 'Planet Basemap\nNewer than\nDelineation Imagery', 
+                    values = c('black', 'red')) +
+  scale_x_continuous(name = 'Maximum Discrepancy') +
+  scale_y_continuous(name = 'Count',
+                     expand = expand_scale(mult = c(0, 0.05)))
+
+arts_grids |>
+  count(max_discrepancy)
 ```
 
 # Map of Output
@@ -185,7 +211,7 @@ ggplot() +
     ) +
   geom_sf(
     data = arts_grids_filter, 
-    aes(color = factor(target_year)), 
+    aes(color = factor(planet_basemap_year)), 
     fill = 'transparent',
     ) +
   scale_color_viridis(discrete = TRUE)
