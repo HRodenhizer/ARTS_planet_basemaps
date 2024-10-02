@@ -43,6 +43,7 @@ arts_grids = planet_grids_filter |>
   mutate(replicate = row_number(),
          .by = c(CentroidLat, CentroidLon)) |>
   select(
+    UID,
     planet_basemap_year, 
     BaseMapDate, 
     CentroidLat, 
@@ -74,7 +75,7 @@ arts_grids = planet_grids_filter |>
      (start_year != 0 & planet_basemap_year >= start_year & planet_basemap_year <= end_year) |
      # if the start year of the delineation imagery is unknown, keep the earliest basemap year
       (start_year == 0 & planet_basemap_year == min(planet_basemap_year)),
-    .by = c(CentroidLat, CentroidLon)
+    .by = c(UID, CentroidLat, CentroidLon)
   ) |>
   rowwise() |>
   mutate(
@@ -105,6 +106,11 @@ arts_grids = planet_grids_filter |>
   ) |>
   ungroup() |>
   st_as_sf()
+
+# st_write(
+#   arts_grids,
+#   './data/rts_polygon_basemap_correspondence.geojson'
+#   )
 
 arts_grids_filter = arts_grids |>
   slice(1, .by = c('id', 'planet_basemap_year')) |>
