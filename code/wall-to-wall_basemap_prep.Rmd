@@ -1,0 +1,107 @@
+---
+title: "Wall-to-Wall Download Prep"
+author: "Heidi Rodenhizer"
+date: "2025-07-10"
+output: html_document
+---
+
+# Load Packages
+
+```{r}
+library(sf)
+library(rnaturalearth)
+library(ggthemes)
+library(tidyverse)
+```
+
+```{r}
+theme_set(theme_bw())
+```
+
+# Load Data
+
+```{r}
+planet_grids = st_read(
+  "./data/circumpolar_global_basemap_grids.geojson"
+) |>
+  filter(str_detect(name, '2023')) # any year after 2016 has the same grid alignment, but some of the earlier years have a lot of ocean grids
+
+arctic_boreal_roi = st_read(
+  "../../tundra_and_boreal_domain/tundra_and_boreal.shp"
+) |>
+  st_make_valid() |>
+  st_union()
+```
+
+# Estimate Storage Space for Wall-to-Wall Imagery
+
+```{r}
+arctic_boreal_grids = planet_grids |>
+  st_filter(
+    arctic_boreal_roi
+  )
+```
+
+```{r}
+n_grids = nrow(arctic_boreal_grids)
+(lower = n_grids * 40 / 1000 / 1000) # TB
+(upper = n_grids * 50 / 1000 / 1000) # TB
+```
+
+```{r}
+world = rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+world = world |>
+  st_transform(3413) |>
+  st_crop(arctic_boreal_grids |>
+            st_transform(3413) |>
+            st_bbox() |>
+            st_as_sfc() |>
+            st_buffer(dist = 200000) |>
+            st_bbox())
+```
+
+```{r}
+ggplot() +
+  geom_sf(
+    data = world,
+    fill = "gray95",
+  ) +
+  geom_sf(
+    data = arctic_boreal_grids,
+    color = "#66CCCC",
+    fill = "transparent",
+    linewidth = 0.05
+  ) +
+  geom_sf(
+    data = arctic_boreal_roi,
+    color = "#006666",
+    fill = "transparent"
+  ) +
+  geom_text(
+    aes(
+      x = Inf,
+      y = -Inf,
+      label = paste(
+        "Lower Estimate (40 MB per grid):", 
+        round(lower, 2), 
+        "TB   \nUpper Estimate (50 MB per grid):", 
+        round(upper, 2),
+        "TB   \n "
+      )
+    ),
+    hjust = 1,
+    vjust = 0
+  ) +
+  coord_sf(
+    crs = 3413,
+    expand = FALSE
+  ) +
+  ggtitle("Planet Basemap Grids\nArctic Boreal Region (Virkkala)") +
+  theme(axis.title = element_blank())
+
+# ggsave("./figures/arctic_boreal_planet_basemap_grids.jpg",
+#        height = 6,
+#        width = 6,
+#        units = "in")
+```
+
