@@ -1,0 +1,379 @@
+---
+title: Download Planet Basemap Scenes for the Circumpolar South Region Using Orders API
+jupyter: python3
+---
+
+This script downloads all basemap grids within the Circumpolar South region for a specific year.
+
+# Set-Up
+## User-Set Options
+
+```{python}
+imagery_year = '2025'
+```
+
+```{python}
+# path for imagery to be delivered to
+delivery_directory = "planet_basemaps/global_quarterly/" + imagery_year + "/q3"
+```
+
+## Load Packages
+
+```{python}
+import os
+import sys
+import json
+from google.cloud import storage
+from google.cloud import storage_control_v2
+import google.auth
+import gcsfs
+from planet import Planet
+import requests
+import urllib.request
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import shapely as shp
+from pprint import pprint
+import math
+import time
+import ast
+import re
+from datetime import datetime
+import concurrent.futures
+import io
+import matplotlib
+import folium
+```
+
+## API Keys
+```{python}
+# Get Planet API Key
+%load_ext dotenv
+%dotenv
+
+api_key = os.getenv('PL_BM_API_KEY')
+gcs_key = os.getenv('GCS_PL_ORDERS_KEY')
+```
+
+## Google Cloud Set-Up
+
+```{python}
+# ! gcloud auth login
+gcloud_creds, _ =google.auth.default()
+```
+
+```{python}
+project_name = "abruptthawmapping"
+storage_client = storage.Client(project=project_name)
+bucket_name = "abrupt_thaw"
+bucket = storage_client.bucket(bucket_name)
+```
+
+# Define Functions
+This needs to be updated to just remove the order_id directory within the delivery directory.
+```{python}
+def rename_data_files(old_path):
+    new_path = re.sub(
+        "global_quarterly_2025q3_mosaic/",
+        "global_quarterly_2025q3_mosaic_",
+        re.sub("/[a-z0-9-]{36}/", "/", old_path),
+    )
+
+    return new_path
+```
+
+# Import Data
+## Circumpolar South Domain
+
+```{python}
+# | scrolled: true
+grids = gpd.read_file(
+    "../circumpolar_planet_basemaps/data/circumpolar_basemap_grids_"
+    + imagery_year
+    + ".geojson"
+)
+grids
+```
+
+## Ecoregions
+
+```{python}
+regions = gpd.read_file(
+    "../RTSmapping_v2/domain/circumpolar_subregions.geojson"
+)
+```
+
+## Training Data Metadata
+
+```{python}
+blob = abrupt_thaw.blob("RTS_MODEL_V2/DATA/TRAINING_DATA/metadata.csv")
+
+data = blob.download_as_bytes()
+training_meta = pd.read_csv(io.BytesIO(data))
+```
+
+## Train/Val/Test Split
+
+```{python}
+blob = abrupt_thaw.blob("RTS_MODEL_V2/DATA/TRAINING_DATA/splits_summary.json")
+
+splits = json.loads(blob.download_as_text())
+
+test_region_names = splits["splits"]["test_realistic"]['ecoregions']
+```
+
+# Sample 100 Images from the Test Regions
+
+```{python}
+meta_test_2024 = training_meta[training_meta.RegionName.isin(test_region_names)]
+
+# split between positive and negative is roughly equal
+meta_test_2024.TrainClass.value_counts()
+
+meta_test_2025 = meta_test_2024.sample(n=100, random_state=1502).reset_index(drop=True)
+meta_test_2025.TrainClass.value_counts()
+
+meta_test_2025 = gpd.GeoDataFrame(
+    meta_test_2025,
+    geometry=gpd.points_from_xy(
+        meta_test_2025.centroid_lon, meta_test_2025.centroid_lat
+    ),
+    crs="EPSG:4326",
+)
+```
+
+```{python}
+grids_filtered = grids.sjoin(meta_test_2025)
+grids_filtered["delivery_location"] = (
+    delivery_directory + "/" + grids_filtered.id.str.replace("-", "/") + "/"
+)
+grids_filtered[["grid_column", "grid_row"]] = grids_filtered.id.str.split("-", expand = True)
+grids_filtered["basemap_name"] = "global_quarterly_2025q3_mosaic"
+```
+
+```{python}
+# grids_filtered.to_file(
+#     "./data/circumpolar_south_planet_basemap_grids_2025_test_set.geojson", index=False
+# )
+```
+
+## Remove Duplicates in Planet Grid IDs
+There are some Planet grids with multiple training tiles that were randomely selected, but we don't want to download the same grid multiple times.
+
+```{python}
+grids_filtered.drop(['index_right', 'Tile_ID', 'centroid_lat', 'centroid_lon', 'TrainClass', 'RegionName', 'UIDs'], axis = 1, inplace = True)
+grids_filtered = grids_filtered.drop_duplicates()
+```
+
+
+# Order Imagery
+From 2024 training data download, we can expect about 39 grids/minute.
+
+```{python}
+expected_delivery_time = grids_filtered.shape[0] / 39 / 60 / 24  # in days
+expected_delivery_time
+```
+
+```{python}
+# | code_folding: []
+# | scrolled: true
+
+# record time downloads started
+start = datetime.now()
+print("Downloads started at ", start)
+
+# Get prior orders from GCS
+blobs = bucket.list_blobs(prefix=delivery_directory)
+files = [file for file in blobs if re.search("quad", file.name)]
+prior_ids = [
+    re.search("\\d{1,4}-\\d{1,4}", file.name.split("/")[-1]).group() for file in files
+]
+
+for index, row in grids_filtered.iterrows():
+    basemap_name = row["basemap_name"]
+    item_id = [row["id"]]  # only deliver a single item at a time
+    delivery_location = row[
+        "delivery_location"
+    ]  # delivery_location includes the row number
+
+    print("-------------------------------------")
+    print(index, ": ", item_id[0])
+
+    if item_id[0] not in prior_ids:  # check if the basemap has already been delivered
+        # create the order info
+        order_info = {
+            "name": item_id[0],
+            "source_type": "basemaps",
+            "products": [{"mosaic_name": basemap_name, "quad_ids": item_id}],
+            "delivery": {
+                "google_cloud_storage": {
+                    "bucket": bucket_name,
+                    "credentials": gcs_key,
+                    "path_prefix": delivery_location,
+                }
+            },
+            "tools": [{"file_format": {"format": "COG"}}],
+        }
+
+        # Place order
+        print(
+            "Requesting item for delivery to " + bucket_name + "/" + delivery_location
+        )
+        request = requests.post(
+            "https://api.planet.com/compute/ops/orders/v2",
+            auth=(api_key, ""),
+            json=order_info,
+        )
+        print(request.status_code)
+        print(request.text)  # raw body as string
+        print(request.headers)  # see content-type etc.
+
+        if str(request) == "<Response [202]>":
+            print("Order has been placed.")
+        else:
+            print(request.json())
+            if str(request) in ["<Response [400]>", "<Response [401]>"]:
+                sys.exit("Invalid request or credentials. Check your request.")
+            if str(request) == "<Response [409]>":
+                while str(request) == "<Response [409]>":
+                    print("Concurrency error. Retrying in 30 seconds...")
+                    time.sleep(30)
+                    request = requests.post(
+                        "https://api.planet.com/compute/ops/orders/v2",
+                        auth=(api_key, ""),
+                        json=order_info,
+                    )
+            if str(request) == "<Response [500]>":
+                while str(request) == "<Response [500]>":
+                    print("Server error. Retrying in 30 seconds...")
+                    time.sleep(30)
+                    request = requests.post(
+                        "https://api.planet.com/compute/ops/orders/v2",
+                        auth=(api_key, ""),
+                        json=order_info,
+                    )
+
+    else:
+        print("Item already delivered. Skipping order.")
+
+end = datetime.now()
+print("Downloads finished at ", end)
+total_time = end - start
+print("Dowloading ", len(grids_filtered), " grids took ", total_time)
+```
+
+# Construct Renaming Logic
+## Find Files to be renamed
+
+Check if any orders are still in progress before finding files in GCS
+```{python}
+pl = Planet()
+
+
+def list_running_orders():
+    orders = list(pl.orders.list_orders(state="running"))
+    return orders
+
+
+running_orders = list_running_orders()
+
+if len(running_orders) == 0:
+    # Get files to be renamed from GCS
+    blobs = bucket.list_blobs(prefix=delivery_directory)
+    files = [file for file in blobs]
+    all_files = [file for file in files]
+    all_names = [file.name for file in all_files]
+else:
+    print("Orders are still running! Do not proceed.")
+```
+
+## Construct New Names for Data Files
+
+```{python}
+renaming_guide = pd.DataFrame({"blob": all_files, "old_name": all_names})
+renaming_guide["new_name"] = renaming_guide.old_name.apply(rename_data_files)
+renaming_guide = renaming_guide.loc[renaming_guide.old_name != renaming_guide.new_name]
+renaming_guide.to_csv(
+    "data/planet_renaming_guide_" + datetime.today().strftime("%Y%m%d_%H%M%S") + ".csv",
+    index=False,
+    mode="x",
+)
+```
+
+## Create List of Old Directories to Delete
+
+```{python}
+directories_to_delete = renaming_guide[["old_name"]]
+directories_to_delete[["directory", "remove"]] = (
+    directories_to_delete.old_name.str.rsplit("/", n=1, expand=True)
+)
+directories_to_delete["directory"] = directories_to_delete.directory + "/"
+directories_to_delete.drop(["remove", "old_name"], axis=1, inplace=True)
+
+directories_to_delete = list(
+    directories_to_delete.drop_duplicates(subset=["directory"], keep="first").directory
+)
+```
+
+# Rename Files
+Rename all files (both data files and manifests) using bucket.copy_blob within a concurrent.futures multithreading process. Then delete all original blobs in one call.
+
+## Copy
+
+```{python}
+start = datetime.now()
+
+
+def copy_blobs(blob, new_name):
+    bucket.copy_blob(blob, bucket, new_name)
+
+
+with concurrent.futures.ThreadPoolExecutor() as executor:
+    executor.map(
+        copy_blobs,
+        list(renaming_guide.blob)[0 : len(renaming_guide.blob)],
+        list(renaming_guide.new_name)[0 : len(renaming_guide.new_name)],
+    )
+
+end = datetime.now()
+print(f"Copying all old files took {end - start}.")
+```
+
+## Delete
+
+### Batch Delete Files
+~ 2500 files per minute
+
+```{python}
+expected_deletion_time = len(directories_to_delete) / 2500 / 60  # in hours
+expected_deletion_time
+```
+
+```{python}
+# Check that all files have been copied over
+new_names = [
+    file.name
+    for file in bucket.list_blobs(prefix=delivery_directory)
+    if not re.search("/[a-z0-9-]{36}/", file.name)
+]
+
+print(len(all_names))
+print(len(new_names))
+
+if len(new_names) == len(
+    all_names
+):  # check that all files have been copied before deleting
+    start = datetime.now()
+    batch_size = 1000
+    batches = [files[i : i + batch_size] for i in range(0, len(files), batch_size)]
+
+    for batch in batches:
+        # Delete all old blobs
+        with storage_client.batch():
+            for blob in batch:
+                blob.delete()
+
+    end = datetime.now()
+    print(f"Deleting all old files took {end - start}.")
+```
