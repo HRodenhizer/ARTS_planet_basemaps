@@ -107,7 +107,7 @@ regions = gpd.read_file(
 ## Training Data Metadata
 
 ```{python}
-blob = abrupt_thaw.blob("RTS_MODEL_V2/DATA/TRAINING_DATA/metadata.csv")
+blob = bucket.blob("RTS_MODEL_V2/DATA/TRAINING_DATA/metadata.csv")
 
 data = blob.download_as_bytes()
 training_meta = pd.read_csv(io.BytesIO(data))
@@ -116,7 +116,7 @@ training_meta = pd.read_csv(io.BytesIO(data))
 ## Train/Val/Test Split
 
 ```{python}
-blob = abrupt_thaw.blob("RTS_MODEL_V2/DATA/TRAINING_DATA/splits_summary.json")
+blob = bucket.blob("RTS_MODEL_V2/DATA/TRAINING_DATA/splits_summary.json")
 
 splits = json.loads(blob.download_as_text())
 
