@@ -1,0 +1,85 @@
+---
+title: Download Planet Basemap Scenes for the Circumpolar South Region Using Orders API
+jupyter: python3
+---
+
+This script downloads all basemap grids within the Circumpolar South region for a specific year.
+
+# Set-Up
+## Load Packages
+
+```{python}
+import os
+import sys
+from google.cloud import storage
+import google.auth
+import pandas as pd
+from pprint import pprint
+import ast
+import re
+```
+
+## API Keys
+```{python}
+# Get Planet API Key
+%load_ext dotenv
+%dotenv
+
+gcs_key = os.getenv('GCS_PL_ORDERS_KEY')
+```
+
+## Google Cloud Set-Up
+
+```{python}
+# ! gcloud auth login
+gcloud_creds, _ =google.auth.default()
+```
+
+```{python}
+project_name = "abruptthawmapping"
+storage_client = storage.Client(project=project_name)
+bucket_name = "abrupt_thaw"
+bucket = storage_client.bucket(bucket_name)
+```
+
+# Define Functions
+This needs to be updated to just remove the order_id directory within the delivery directory.
+```{python}
+def rename_to_flat_folder_structure(old_path, base_path):
+    file_name = old_path.split(sep="/")[-1]
+    new_path = base_path + "/" + file_name
+
+    return new_path
+```
+
+# Find Image Filepaths
+## Train/Val/Test Split
+
+```{python}
+blobs = bucket.list_blobs(prefix="planet_basemaps/global_quarterly/2025/q3")
+blobs = [blob for blob in blobs]
+
+files = pd.DataFrame(
+    {
+        "blob": [blob for blob in blobs if re.search("quad.*tif$", blob.name)],
+        "filepath": [blob.name for blob in blobs if re.search("quad.*tif$", blob.name)]
+    }
+)
+```
+
+
+```{python}
+files["download_location"] = [
+    rename_to_flat_folder_structure(
+        file,
+        "/mnt/0AA6E441A6E42F3F/Users/Heidi Rodenhizer/Documents/ArcGIS/Projects/ARTSManualEditing/test_set_2025/imagery",
+    )
+    for file in files.filepath
+]
+```
+
+```{python}
+for blob, download_location in zip(files.blob, files.download_location):
+    print(f"Downloading {blob.name} -> {download_location}")
+    blob.download_to_filename(download_location)
+```
