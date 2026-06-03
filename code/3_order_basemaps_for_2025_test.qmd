@@ -123,7 +123,16 @@ splits = json.loads(blob.download_as_text())
 test_region_names = splits["splits"]["test_realistic"]['ecoregions']
 ```
 
-# Sample 100 Images from the Test Regions
+## 2024 Polygons
+
+```{python}
+polygons = gpd.read_file(
+    "./data/test_set_2025/revised_polygons_1939tiles.geojson"
+)
+```
+
+# Sample 100 Training Tiles from the Test Regions
+# 100 Random Tiles
 
 ```{python}
 meta_test_2024 = training_meta[training_meta.RegionName.isin(test_region_names)]
@@ -137,18 +146,57 @@ meta_test_2025.TrainClass.value_counts()
 meta_test_2025 = gpd.GeoDataFrame(
     meta_test_2025,
     geometry=gpd.points_from_xy(
-        meta_test_2025.centroid_lon, meta_test_2025.centroid_lat
-    ),
-    crs="EPSG:4326",
-)
+        meta_test_2025.centroid_lon, meta_test_2025.centroid_lat, crs="EPSG:4326"
+    )
+    .to_crs("EPSG:3857")
+    .buffer(distance=512 * 4.77/2, cap_style="square"),
+).to_crs("EPSG:4326")
 ```
 
 ```{python}
+# meta_test_2025.to_file(
+#     "./data/circumpolar_south_2025_test_set_tiles.geojson", index=False
+# )
+```
+
+## Find Polygons Within Sampled Testing Tiles
+
+```{python}
+idx = polygons.to_crs(4326).intersects(meta_test_2025.geometry.union_all(), align=True)
+polys_test_2025 = polygons.to_crs(4326).loc[idx]
+```
+
+```{python}
+# polys_test_2025.to_file("./data/revised_polygons_2024_test_sample.geojson")
+```
+
+
+## Get Planet Grids for Download
+
+```{python}
 grids_filtered = grids.sjoin(meta_test_2025)
+```
+
+Find any sampled polygons that cross beyond the Planet grid boundary.
+```{python}
+polys_wout_imagery = polys_test_2025.difference(grids_filtered.geometry.union_all())
+polys_wout_imagery = polys_wout_imagery.loc[~polys_wout_imagery.geometry.is_empty,]
+```
+
+Get Planet grids for missing components of polygons
+
+```{python}
+extra_grids = grids.sjoin(gpd.GeoDataFrame(geometry = polys_wout_imagery)).drop(["index_right"], axis = 1)
+grids_filtered = pd.concat([grids_filtered, extra_grids])
+```
+
+```{python}
 grids_filtered["delivery_location"] = (
     delivery_directory + "/" + grids_filtered.id.str.replace("-", "/") + "/"
 )
-grids_filtered[["grid_column", "grid_row"]] = grids_filtered.id.str.split("-", expand = True)
+grids_filtered[["grid_column", "grid_row"]] = grids_filtered.id.str.split(
+    "-", expand=True
+)
 grids_filtered["basemap_name"] = "global_quarterly_2025q3_mosaic"
 ```
 
@@ -165,6 +213,7 @@ There are some Planet grids with multiple training tiles that were randomely sel
 grids_filtered.drop(['index_right', 'Tile_ID', 'centroid_lat', 'centroid_lon', 'TrainClass', 'RegionName', 'UIDs'], axis = 1, inplace = True)
 grids_filtered = grids_filtered.drop_duplicates()
 ```
+
 
 
 # Order Imagery

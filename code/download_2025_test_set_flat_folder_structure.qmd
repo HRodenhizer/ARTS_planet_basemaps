@@ -80,6 +80,7 @@ files["download_location"] = [
 
 ```{python}
 for blob, download_location in zip(files.blob, files.download_location):
-    print(f"Downloading {blob.name} -> {download_location}")
-    blob.download_to_filename(download_location)
+    if not os.path.exists(download_location):
+        print(f"Downloading {blob.name} -> {download_location}")
+        blob.download_to_filename(download_location)
 ```
